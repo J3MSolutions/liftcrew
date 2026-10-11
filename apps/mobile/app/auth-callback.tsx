@@ -53,9 +53,8 @@ export default function AuthCallback() {
       let err: unknown = null;
       if (p.code) {
         ({ error: err } = await supabase.auth.exchangeCodeForSession(p.code));
-      } else if (p.access_token && p.refresh_token) {
-        ({ error: err } = await supabase.auth.setSession({ access_token: p.access_token, refresh_token: p.refresh_token }));
       } else {
+        // Raw tokens in a link are refused: any app or web page could craft one (login CSRF).
         router.replace('/');
         return;
       }

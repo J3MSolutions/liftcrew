@@ -133,7 +133,7 @@ insert into ids select 'BA', id from public.book_requester((select v from ids wh
 insert into ids select 'BB', id from public.invite_mover((select v from ids where k='J1'), :mB);
 select tests.throws($$select public.invite_mover((select v from ids where k='J1'), '20000000-0000-0000-0000-00000000000c')$$,
   'already full', 'cannot overbook the crew');
-select tests.ok(tests.n('select * from public.mover_private') = 2, 'company sees phones of booked movers');
+select tests.ok(tests.n('select * from public.mover_private') = 1, 'company sees the phone of a confirmed mover, not of a pending invite');
 select tests.ok(tests.val($$select status from public.hires where mover_id = '20000000-0000-0000-0000-00000000000a'$$) = 'needed', 'hiring paperwork tracked as needed');
 select public.set_hire_status(:mA, 'sent');
 
@@ -147,6 +147,8 @@ select tests.login(:mB);
 select tests.ok(tests.n('select * from public.mover_private') = 1, 'movers cannot see other movers phones');
 select tests.ok(tests.n('select * from public.bookings') = 1, 'movers see only their own bookings');
 select public.respond_booking((select v from ids where k='BB'), true);
+select tests.login(:co1);
+select tests.ok(tests.n('select * from public.mover_private') = 2, 'phone unlocks once the mover accepts');
 
 -- ---------------------------------------------------------------- standby and cancellation
 select tests.login(:co1);
@@ -231,17 +233,70 @@ select tests.login(:mD);
 select tests.ok(tests.n($$select * from public.jobs where id = (select v from ids where k='J1')$$) = 0, 'uninvolved movers do not see closed jobs');
 select tests.ok(tests.n('select * from public.bookings') = 0, 'uninvolved movers see no bookings');
 
+-- ---------------------------------------------------------------- nothing changes once a job has started
+select tests.login(:co1);
+insert into ids select 'J2', id from public.post_job(public.app_today() + 2, '08:00', 4, 'Cotati to Penngrove', 'Studio apartment', 1, 'Helper', 30, 'Cargo van');
+insert into ids select 'B2', id from public.invite_mover((select v from ids where k='J2'), :mB);
+select tests.login(:mB);
+select public.respond_booking((select v from ids where k='B2'), true);
+select tests.login('');
+update public.jobs set work_date = public.app_today() - 1 where id = (select v from ids where k='J2');
+select tests.login(:co1);
+select tests.throws($$select public.withdraw_booking((select v from ids where k='B2'))$$, 'has started', 'company cannot erase a worked booking after the start');
+select tests.throws($$select public.cancel_job((select v from ids where k='J2'))$$, 'has started', 'company cannot cancel a job after the crew started');
+select tests.login(:mB);
+select tests.throws($$select public.cancel_booking((select v from ids where k='B2'), 'Sick')$$, 'already started', 'mover cannot turn a no-show into a cancellation');
+
+-- ---------------------------------------------------------------- internal functions are not callable
+select tests.login(:mA);
+select tests.throws($$select public.ensure_hire(public.my_company_id(), auth.uid())$$, 'permission denied', 'movers cannot forge hiring records');
+select tests.throws($$select public.job_starts_at((select v from ids where k='J1'))$$, 'permission denied', 'internal job helpers are not callable');
+select tests.throws($$select public.check_bookable(null::public.jobs, auth.uid())$$, 'permission denied', 'booking checks cannot be used to probe other movers');
+select tests.login('');
+select tests.ok((select string_agg(p.proname, ',' order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and has_function_privilege('authenticated', p.oid, 'execute')) =
+  'app_timezone,app_today,book_requester,cancel_booking,cancel_job,company_can_contact,complete_job,contains_sensitive_number,create_company,create_mover_profile,dispute_review,invite_mover,is_company,is_mover,mark_paid,mark_standby_paid,mover_involved_in_job,mover_stats,my_booking_fees,my_company,my_company_id,offer_standby,open_spots,post_job,record_tip,request_job,respond_booking,respond_standby,respond_to_review,review_removed,set_hire_status,submit_review,withdraw_booking,withdraw_request,withdraw_standby',
+  'signed-in users can execute only the intended functions');
+
+-- ---------------------------------------------------------------- company details
+select tests.login(:mA);
+select tests.throws('select permit_number from public.companies', 'permission denied', 'movers cannot read permit numbers or owner ids');
+select tests.ok(tests.n('select id, name, city from public.companies') = 2, 'movers see verified company names');
+select tests.ok(tests.n('select * from public.my_company()') = 0, 'movers have no company');
+select tests.login(:co3);
+select tests.ok((select permit_number from public.my_company()) = 'MTR0000001', 'owners read their own full company record');
+select tests.login(:co1);
+select tests.throws($$update public.companies set name = 'Bayside Relocation' where id = public.my_company_id()$$, 'permission denied', 'companies cannot rename themselves without staff');
+update public.companies set payroll_portal_name = 'Gusto', payroll_portal_url = 'https://app.gusto.com' where id = public.my_company_id();
+select tests.ok((select payroll_portal_name from public.my_company()) = 'Gusto', 'companies can set their payroll portal');
+
 -- ---------------------------------------------------------------- profile edits
 select tests.login(:mA);
 select tests.throws($$update public.movers set id_verified = true where id = auth.uid()$$, 'permission denied', 'movers cannot mark themselves ID verified');
 select tests.throws($$update public.movers set background = 'clear' where id = auth.uid()$$, 'permission denied', 'movers cannot set their background result');
 select tests.throws($$update public.movers set bio = 'Account 12345678901' where id = auth.uid()$$, 'check constraint', 'bio edits block account numbers');
+select tests.throws($$update public.movers set full_name = 'Marcus 123-45-6789' where id = auth.uid()$$, 'check constraint', 'name edits block SSNs');
+select tests.throws($$update public.movers set city = '4111111111111111' where id = auth.uid()$$, 'check constraint', 'city edits block card numbers');
+select tests.throws($$update public.mover_private set phone = '123-45-6789' where mover_id = auth.uid()$$, '10-digit', 'an SSN cannot be saved as a phone');
+update public.mover_private set phone = '+1 707.555.0199' where mover_id = auth.uid();
+select tests.ok((select phone from public.mover_private where mover_id = auth.uid()) = '(707) 555-0199', 'phones are normalized');
 update public.movers set bio = 'Updated bio' where id = '20000000-0000-0000-0000-00000000000b';
 select tests.login('');
 select tests.ok(tests.val($$select coalesce(bio, '') from public.movers where id = '20000000-0000-0000-0000-00000000000b'$$) <> 'Updated bio',
   'movers cannot edit other movers');
 
+-- ---------------------------------------------------------------- removed reviews disappear
+select tests.login('');
+update public.review_disputes set status = 'removed', resolved_at = now() where review_id = (select v from ids where k='RB');
+select tests.login(:co2);
+select tests.ok(tests.n('select * from public.reviews') = 0, 'a removed review is hidden from companies');
+select tests.ok((select reviews from public.mover_stats(array['20000000-0000-0000-0000-00000000000b'::uuid])) = 0, 'a removed review no longer counts in stats');
+select tests.login(:mB);
+select tests.ok(tests.n('select * from public.reviews') + tests.n('select * from public.review_responses') = 0, 'a removed review is hidden from the mover too');
+
 -- ---------------------------------------------------------------- sensitive-number detector
+select tests.ok(public.contains_sensitive_number('SSN 123.45.6789'), 'detects SSN with dots');
+select tests.ok(public.contains_sensitive_number('ssn 123 456 789'), 'detects 3-3-3 grouping');
 select tests.ok(public.contains_sensitive_number('SSN 123-45-6789'), 'detects SSN with dashes');
 select tests.ok(public.contains_sensitive_number('123456789'), 'detects 9-digit run');
 select tests.ok(public.contains_sensitive_number('4111 1111 1111 1111'), 'detects card number');

@@ -21,7 +21,8 @@ export const getViewer = cache(async (): Promise<Viewer> => {
 
   const [profileRes, companyRes] = await Promise.all([
     supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
-    supabase.from('companies').select('*').eq('owner_id', user.id).maybeSingle(),
+    // Full company record (permit, insurance) is readable only by its owner, through my_company().
+    supabase.rpc('my_company').maybeSingle(),
   ]);
   return {
     supabase,

@@ -41,9 +41,10 @@ create function public.max_standby_per_job() returns int language sql immutable 
 -- True when text contains something shaped like a Social Security, card or bank account number.
 create function public.contains_sensitive_number(t text) returns boolean
 language sql immutable as $$
-  select coalesce(t, '') ~ '(^|[^0-9])[0-9]{3}[- ][0-9]{2}[- ][0-9]{4}([^0-9]|$)'   -- 123-45-6789
+  select coalesce(t, '') ~ '(^|[^0-9])[0-9]{3}[-. ][0-9]{2}[-. ][0-9]{4}([^0-9]|$)'  -- 123-45-6789, 123.45.6789
+      or coalesce(t, '') ~ '(^|[^0-9])[0-9]{3}[-. ][0-9]{3}[-. ][0-9]{3}([^0-9]|$)'     -- 123 456 789
       or coalesce(t, '') ~ '(^|[^0-9])[0-9]{9,17}([^0-9]|$)'                          -- 123456789, bank accounts
-      or coalesce(t, '') ~ '(^|[^0-9])([0-9][ -]?){12,18}[0-9]([^0-9]|$)'             -- card numbers with spaces/dashes
+      or coalesce(t, '') ~ '(^|[^0-9])([0-9][ .-]?){12,18}[0-9]([^0-9]|$)'            -- card numbers with separators
 $$;
 
 create function public.clean_text(t text, max_len int) returns text
@@ -73,22 +74,22 @@ create table public.profiles (
 create table public.companies (
   id                  uuid primary key default gen_random_uuid(),
   owner_id            uuid not null unique references public.profiles (id) on delete cascade,
-  name                text not null check (char_length(name) between 2 and 120),
-  city                text not null check (char_length(city) between 2 and 80),
+  name                text not null check (char_length(name) between 2 and 120 and not public.contains_sensitive_number(name)),
+  city                text not null check (char_length(city) between 2 and 80 and not public.contains_sensitive_number(city)),
   permit_number       text not null check (permit_number ~ '^[A-Z0-9-]{4,20}$'),   -- BHGS Cal-T number, public record
   insurance_expires   date not null,
   verified            boolean not null default false,                              -- set by LiftCrew staff only
   job_prefix          text not null check (job_prefix ~ '^[A-Z]{2,4}$'),
   next_job_seq        int not null default 1000,
-  payroll_portal_name text check (char_length(payroll_portal_name) <= 60),
-  payroll_portal_url  text check (payroll_portal_url ~ '^https://[^\s]{3,300}$'),
+  payroll_portal_name text check (char_length(payroll_portal_name) <= 60 and not public.contains_sensitive_number(payroll_portal_name)),
+  payroll_portal_url  text check (payroll_portal_url ~ '^https://[^[:space:]]{3,}$' and char_length(payroll_portal_url) <= 300),
   created_at          timestamptz not null default now()
 );
 
 create table public.movers (
   id               uuid primary key references public.profiles (id) on delete cascade,
-  full_name        text not null check (char_length(full_name) between 2 and 80),
-  city             text not null check (char_length(city) between 2 and 80),
+  full_name        text not null check (char_length(full_name) between 2 and 80 and not public.contains_sensitive_number(full_name)),
+  city             text not null check (char_length(city) between 2 and 80 and not public.contains_sensitive_number(city)),
   roles            public.work_role[] not null check (cardinality(roles) between 1 and 4),
   license          public.license_class not null default 'None',
   years_experience int not null default 0 check (years_experience between 0 and 60),
@@ -104,8 +105,23 @@ create table public.movers (
 
 create table public.mover_private (
   mover_id uuid primary key references public.movers (id) on delete cascade,
-  phone    text not null check (phone ~ '^[0-9()+. -]{7,20}$')
+  phone    text not null check (phone ~ '^\([0-9]{3}\) [0-9]{3}-[0-9]{4}$')   -- stored as (707) 555-0101
 );
+
+-- Accepts any common US format and stores (XXX) XXX-XXXX. Anything that isn't a 10-digit US number is refused,
+-- so an SSN or account number can't be saved as a "phone".
+create function public.normalize_phone() returns trigger language plpgsql as $$
+declare d text := regexp_replace(coalesce(new.phone, ''), '[^0-9]', '', 'g');
+begin
+  if char_length(d) = 11 and left(d, 1) = '1' then d := substr(d, 2); end if;
+  if char_length(d) <> 10 or left(d, 1) in ('0', '1') then
+    raise exception 'Enter a 10-digit US mobile number.' using errcode = '22023';
+  end if;
+  new.phone := '(' || substr(d, 1, 3) || ') ' || substr(d, 4, 3) || '-' || substr(d, 7, 4);
+  return new;
+end $$;
+create trigger mover_private_phone before insert or update on public.mover_private
+  for each row execute function public.normalize_phone();
 
 create table public.jobs (
   id           uuid primary key default gen_random_uuid(),
@@ -119,7 +135,7 @@ create table public.jobs (
   crew_size    int not null check (crew_size between 1 and 20),
   role         public.work_role not null,
   hourly_rate  numeric(6,2) not null check (hourly_rate > 0 and hourly_rate <= 500),
-  truck        text not null check (char_length(truck) <= 60),
+  truck        text not null check (char_length(truck) <= 60 and not public.contains_sensitive_number(truck)),
   status       public.job_status not null default 'open',
   created_at   timestamptz not null default now(),
   completed_at timestamptz
@@ -234,14 +250,15 @@ language sql stable security definer set search_path = '' as $$
   select exists (select 1 from public.movers m where m.id = auth.uid())
 $$;
 
--- Company may see this mover's phone while a booking is current (pending/confirmed, or completed in the last 14 days).
+-- Company may see this mover's phone once the mover has accepted (confirmed), and for 14 days after a completed job.
+-- A pending invitation does not unlock it, so invite-then-withdraw can't be used to collect numbers.
 create function public.company_can_contact(p_mover uuid) returns boolean
 language sql stable security definer set search_path = '' as $$
   select exists (
     select 1 from public.bookings b join public.jobs j on j.id = b.job_id
     where b.mover_id = p_mover
       and j.company_id = public.my_company_id()
-      and (b.status in ('pending','confirmed')
+      and (b.status = 'confirmed'
            or (b.status = 'completed' and j.work_date >= public.app_today() - 14))
   )
 $$;
@@ -254,11 +271,19 @@ language sql stable security definer set search_path = '' as $$
       or exists (select 1 from public.job_requests r where r.job_id = p_job and r.mover_id = auth.uid())
 $$;
 
+create function public.review_removed(p_review uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.review_disputes d where d.review_id = p_review and d.status = 'removed')
+$$;
+
+-- Open spots on a job the caller can see (their company's job, or any job for a mover).
 create function public.open_spots(p_job uuid) returns int
 language sql stable security definer set search_path = '' as $$
   select j.crew_size - (select count(*)::int from public.bookings b
                         where b.job_id = j.id and b.status in ('pending','confirmed'))
-  from public.jobs j where j.id = p_job
+  from public.jobs j
+  where j.id = p_job
+    and (j.company_id = public.my_company_id() or public.is_mover() or auth.uid() is null)
 $$;
 
 create function public.job_starts_at(p_job uuid) returns timestamptz
@@ -326,13 +351,16 @@ create policy hires_read on public.hires for select to authenticated
   using (mover_id = auth.uid() or company_id = public.my_company_id());
 
 -- The core rule: company reviews are shared among verified companies and shown to the reviewed mover.
+-- A review LiftCrew staff removed after a dispute disappears for everyone, including from stats.
 create policy reviews_read on public.reviews for select to authenticated
-  using (mover_id = auth.uid() or public.is_company());
+  using ((mover_id = auth.uid() or public.is_company()) and not public.review_removed(id));
 create policy review_responses_read on public.review_responses for select to authenticated using (
   exists (select 1 from public.reviews r where r.id = review_id and (r.mover_id = auth.uid() or public.is_company()))
+  and not public.review_removed(review_id)
 );
 create policy review_disputes_read on public.review_disputes for select to authenticated using (
   exists (select 1 from public.reviews r where r.id = review_id and (r.mover_id = auth.uid() or public.is_company()))
+  and status <> 'removed'
 );
 
 -- ---------------------------------------------------------------------------
@@ -340,11 +368,13 @@ create policy review_disputes_read on public.review_disputes for select to authe
 -- (Supabase grants ALL on new tables to anon/authenticated by default, so revoke first.)
 -- ---------------------------------------------------------------------------
 revoke all on all tables in schema public from anon, authenticated;
-grant select on public.profiles, public.companies, public.movers, public.mover_private, public.jobs,
+grant select (id, name, city, verified, job_prefix, payroll_portal_name, payroll_portal_url, created_at)
+  on public.companies to authenticated;     -- owner_id, permit and insurance only via my_company()
+grant select on public.profiles, public.movers, public.mover_private, public.jobs,
   public.job_requests, public.bookings, public.standby, public.hires, public.reviews,
   public.review_responses, public.review_disputes to authenticated;
--- Permit and insurance changes go through LiftCrew staff, who re-verify them.
-grant update (name, city, payroll_portal_name, payroll_portal_url) on public.companies to authenticated;
+-- Name, permit and insurance changes go through LiftCrew staff, who re-verify them.
+grant update (city, payroll_portal_name, payroll_portal_url) on public.companies to authenticated;
 grant update (full_name, city, roles, license, years_experience, asking_rate, bio, available_days, updated_at)
   on public.movers to authenticated;
 grant update (phone) on public.mover_private to authenticated;
@@ -368,6 +398,12 @@ create trigger on_auth_user_created after insert on auth.users
 create function public.touch_mover() returns trigger language plpgsql as $$
 begin new.updated_at := now(); return new; end $$;
 create trigger movers_touch before update on public.movers for each row execute function public.touch_mover();
+
+-- The caller's own company, all columns (verified or not).
+create function public.my_company() returns setof public.companies
+language sql stable security definer set search_path = '' as $$
+  select * from public.companies where owner_id = auth.uid()
+$$;
 
 -- ---------------------------------------------------------------------------
 -- RPCs: onboarding
@@ -424,14 +460,30 @@ begin
   return cid;
 end $$;
 
+-- Locks the job row (FOR UPDATE) so concurrent changes to the same job run one at a time.
+-- Lock order everywhere: job first, then its bookings/standby rows.
 create function public.require_own_job(p_job uuid) returns public.jobs
-language plpgsql stable security definer set search_path = '' as $$
+language plpgsql security definer set search_path = '' as $$
 declare j public.jobs;
 begin
-  select * into j from public.jobs where id = p_job and company_id = public.require_company();
+  select * into j from public.jobs where id = p_job and company_id = public.require_company() for update;
   if not found then raise exception 'Job not found.' using errcode = '42501'; end if;
   return j;
 end $$;
+
+create function public.lock_job(p_job uuid) returns public.jobs
+language plpgsql security definer set search_path = '' as $$
+declare j public.jobs;
+begin
+  select * into j from public.jobs where id = p_job for update;
+  if not found then raise exception 'Job not found.'; end if;
+  return j;
+end $$;
+
+create function public.job_started(p_job uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select now() >= public.job_starts_at(p_job)
+$$;
 
 create function public.post_job(
   p_work_date date, p_start_time time, p_est_hours numeric, p_route text, p_description text,
@@ -478,7 +530,6 @@ create function public.invite_mover(p_job uuid, p_mover uuid) returns public.boo
 language plpgsql security definer set search_path = '' as $$
 declare j public.jobs := public.require_own_job(p_job); b public.bookings;
 begin
-  perform 1 from public.jobs where id = p_job for update;  -- serialize spot counting
   perform public.check_bookable(j, p_mover);
   update public.standby set status = 'withdrawn' where job_id = p_job and mover_id = p_mover and status in ('offered','accepted');
   insert into public.bookings (job_id, mover_id, status, hourly_rate, est_hours)
@@ -493,7 +544,6 @@ create function public.book_requester(p_job uuid, p_mover uuid) returns public.b
 language plpgsql security definer set search_path = '' as $$
 declare j public.jobs := public.require_own_job(p_job); b public.bookings;
 begin
-  perform 1 from public.jobs where id = p_job for update;
   if not exists (select 1 from public.job_requests where job_id = p_job and mover_id = p_mover) then
     raise exception 'This mover hasn''t requested this job.';
   end if;
@@ -511,10 +561,14 @@ create function public.withdraw_booking(p_booking uuid) returns public.bookings
 language plpgsql security definer set search_path = '' as $$
 declare b public.bookings; j public.jobs;
 begin
-  select * into b from public.bookings where id = p_booking for update;
+  select * into b from public.bookings where id = p_booking;
   if not found then raise exception 'Booking not found.'; end if;
   j := public.require_own_job(b.job_id);
+  select * into b from public.bookings where id = p_booking for update;
   if b.status not in ('pending','confirmed') or j.status <> 'open' then raise exception 'This booking can''t be withdrawn.'; end if;
+  if public.job_started(j.id) then
+    raise exception 'The job has started. Mark the job complete and enter 0 hours for anyone who didn''t work.';
+  end if;
   update public.bookings set status = 'withdrawn', canceled_at = now(), pay_status = 'none'
     where id = p_booking returning * into b;
   return b;
@@ -534,7 +588,6 @@ create function public.offer_standby(p_job uuid, p_mover uuid) returns public.st
 language plpgsql security definer set search_path = '' as $$
 declare j public.jobs := public.require_own_job(p_job); s public.standby; m public.movers;
 begin
-  perform 1 from public.jobs where id = p_job for update;
   if j.status <> 'open' or j.work_date < public.app_today() then raise exception 'This job is no longer open.'; end if;
   if (select count(*) from public.standby where job_id = p_job and status in ('offered','accepted'))
      >= public.max_standby_per_job() then
@@ -555,9 +608,10 @@ create function public.withdraw_standby(p_standby uuid) returns public.standby
 language plpgsql security definer set search_path = '' as $$
 declare s public.standby;
 begin
-  select * into s from public.standby where id = p_standby for update;
+  select * into s from public.standby where id = p_standby;
   if not found then raise exception 'Standby offer not found.'; end if;
   perform public.require_own_job(s.job_id);
+  select * into s from public.standby where id = p_standby for update;
   if s.status not in ('offered','accepted') then raise exception 'This standby offer is already closed.'; end if;
   update public.standby set status = 'withdrawn' where id = p_standby returning * into s;
   return s;
@@ -570,7 +624,6 @@ returns public.jobs
 language plpgsql security definer set search_path = '' as $$
 declare j public.jobs := public.require_own_job(p_job); b record; e jsonb; hrs numeric; tp numeric;
 begin
-  perform 1 from public.jobs where id = p_job for update;
   if j.status <> 'open' then raise exception 'This job is already closed.'; end if;
   if j.work_date > public.app_today() then raise exception 'You can complete a job on or after its date.'; end if;
   for b in select * from public.bookings where job_id = p_job and status = 'confirmed' loop
@@ -604,6 +657,9 @@ language plpgsql security definer set search_path = '' as $$
 declare j public.jobs := public.require_own_job(p_job);
 begin
   if j.status <> 'open' then raise exception 'This job is already closed.'; end if;
+  if public.job_started(j.id) and exists (select 1 from public.bookings where job_id = p_job and status = 'confirmed') then
+    raise exception 'The job has started. Mark the job complete and enter 0 hours for anyone who didn''t work.';
+  end if;
   update public.bookings set status = 'withdrawn', canceled_at = now(), pay_status = 'none'
     where job_id = p_job and status in ('pending','confirmed');
   update public.standby set status = 'withdrawn' where job_id = p_job and status in ('offered','accepted');
@@ -709,10 +765,11 @@ language plpgsql security definer set search_path = '' as $$
 declare b public.bookings; j public.jobs;
 begin
   perform public.require_mover();
-  select * into b from public.bookings where id = p_booking and mover_id = auth.uid() for update;
+  select * into b from public.bookings where id = p_booking and mover_id = auth.uid();
   if not found then raise exception 'Invitation not found.'; end if;
+  j := public.lock_job(b.job_id);
+  select * into b from public.bookings where id = p_booking for update;
   if b.status <> 'pending' then raise exception 'This invitation was already answered.'; end if;
-  select * into j from public.jobs where id = b.job_id;
   if p_accept and (j.status <> 'open' or j.work_date < public.app_today()) then raise exception 'This job is no longer open.'; end if;
   update public.bookings set status = case when p_accept then 'confirmed'::public.booking_status else 'declined'::public.booking_status end,
     responded_at = now(), pay_status = case when p_accept then 'upcoming'::public.pay_status else 'none'::public.pay_status end
@@ -727,11 +784,15 @@ language plpgsql security definer set search_path = '' as $$
 declare b public.bookings; j public.jobs; s public.standby; nb public.bookings;
 begin
   perform public.require_mover();
-  select * into b from public.bookings where id = p_booking and mover_id = auth.uid() for update;
+  select * into b from public.bookings where id = p_booking and mover_id = auth.uid();
   if not found then raise exception 'Booking not found.'; end if;
+  j := public.lock_job(b.job_id);
+  select * into b from public.bookings where id = p_booking for update;
   if b.status <> 'confirmed' then raise exception 'Only confirmed bookings can be canceled.'; end if;
-  select * into j from public.jobs where id = b.job_id for update;
   if j.status <> 'open' then raise exception 'This job is already closed.'; end if;
+  if public.job_started(j.id) then
+    raise exception 'This job has already started. Call the company instead.';
+  end if;
   update public.bookings set status = 'canceled', canceled_at = now(), cancel_reason = coalesce(p_reason, 'Other'),
     late_cancel = (public.job_starts_at(j.id) - now()) < public.late_cancel_window(), pay_status = 'none'
     where id = p_booking returning * into b;
@@ -752,9 +813,10 @@ language plpgsql security definer set search_path = '' as $$
 declare s public.standby; j public.jobs;
 begin
   perform public.require_mover();
-  select * into s from public.standby where id = p_standby and mover_id = auth.uid() for update;
+  select * into s from public.standby where id = p_standby and mover_id = auth.uid();
   if not found then raise exception 'Standby offer not found.'; end if;
-  select * into j from public.jobs where id = s.job_id;
+  j := public.lock_job(s.job_id);
+  select * into s from public.standby where id = p_standby for update;
   if p_accept then
     if s.status <> 'offered' then raise exception 'This standby offer was already answered.'; end if;
     if j.status <> 'open' or j.work_date < public.app_today() then raise exception 'This job is no longer open.'; end if;
@@ -802,13 +864,13 @@ returns table (mover_id uuid, jobs_completed int, reviews int, on_time_pct int, 
 language sql stable security definer set search_path = '' as $$
   select m.id,
     (select count(*)::int from public.bookings b where b.mover_id = m.id and b.status = 'completed' and b.hours_worked > 0),
-    (select count(*)::int from public.reviews r where r.mover_id = m.id),
+    (select count(*)::int from public.reviews r where r.mover_id = m.id and not public.review_removed(r.id)),
     (select case when count(*) filter (where r.showed) = 0 then null
             else round(100.0 * count(*) filter (where r.on_time) / count(*) filter (where r.showed))::int end
-       from public.reviews r where r.mover_id = m.id),
+       from public.reviews r where r.mover_id = m.id and not public.review_removed(r.id)),
     (select case when count(*) = 0 then null else round(100.0 * count(*) filter (where r.rebook) / count(*))::int end
-       from public.reviews r where r.mover_id = m.id),
-    (select count(*)::int from public.reviews r where r.mover_id = m.id and not r.showed),
+       from public.reviews r where r.mover_id = m.id and not public.review_removed(r.id)),
+    (select count(*)::int from public.reviews r where r.mover_id = m.id and not public.review_removed(r.id) and not r.showed),
     (select count(*)::int from public.bookings b where b.mover_id = m.id and b.status = 'canceled' and b.late_cancel)
   from public.movers m
   where m.id = any (p_movers)
@@ -831,7 +893,8 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Function privileges: nothing for anon; RPCs for signed-in users only.
 -- ---------------------------------------------------------------------------
-revoke execute on all functions in schema public from public, anon;
+revoke execute on all functions in schema public from public, anon, authenticated;
+alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
 grant execute on function
   public.create_company(text, text, text, date, text),
   public.create_mover_profile(text, text, public.work_role[], public.license_class, int, numeric, text, text[], text),
@@ -844,9 +907,9 @@ grant execute on function
   public.request_job(uuid), public.withdraw_request(uuid), public.respond_booking(uuid, boolean),
   public.cancel_booking(uuid, public.cancel_reason), public.respond_standby(uuid, boolean),
   public.respond_to_review(uuid, text), public.dispute_review(uuid, text),
-  public.mover_stats(uuid[]), public.my_booking_fees(date), public.open_spots(uuid),
-  public.contains_sensitive_number(text), public.app_today(),
-  -- used inside RLS policies, so the calling role needs execute:
+  public.mover_stats(uuid[]), public.my_booking_fees(date), public.open_spots(uuid), public.my_company(),
+  public.contains_sensitive_number(text), public.app_today(), public.app_timezone(),
+  -- used inside RLS policies, so the calling role needs execute. They return only booleans about the caller:
   public.my_company_id(), public.is_company(), public.is_mover(), public.company_can_contact(uuid),
-  public.mover_involved_in_job(uuid)
+  public.mover_involved_in_job(uuid), public.review_removed(uuid)
 to authenticated;

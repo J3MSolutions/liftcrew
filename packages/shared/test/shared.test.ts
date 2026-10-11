@@ -14,6 +14,8 @@ test('sensitive numbers match the database rules', () => {
   assert.ok(containsSensitiveNumber('SSN 123-45-6789'));
   assert.ok(containsSensitiveNumber('acct 123456789'));
   assert.ok(containsSensitiveNumber('4111 1111 1111 1111'));
+  assert.ok(containsSensitiveNumber('SSN 123.45.6789'));
+  assert.ok(containsSensitiveNumber('ssn 123 456 789'));
   assert.ok(!containsSensitiveNumber('Call (707) 555-0148 after 5'));
   assert.ok(!containsSensitiveNumber('Moved 3 couches on 10/03/2026, 6.5 hrs'));
 });

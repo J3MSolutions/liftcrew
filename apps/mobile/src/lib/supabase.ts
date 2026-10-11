@@ -18,6 +18,8 @@ export const supabase = createClient(url || 'http://localhost:54321', anonKey ||
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
+    // PKCE: email links carry a one-time code that only this app (holding the verifier) can exchange.
+    flowType: 'pkce',
   },
 });
 

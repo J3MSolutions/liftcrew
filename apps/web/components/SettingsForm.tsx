@@ -13,7 +13,7 @@ type Editable = Pick<Company, 'id' | 'name' | 'city' | 'payroll_portal_name' | '
 export function SettingsForm({ company }: { company: Editable }) {
   const router = useRouter();
   const toast = useToast();
-  const [name, setName] = useState(company.name);
+  const [name] = useState(company.name);
   const [city, setCity] = useState(company.city);
   const [portalName, setPortalName] = useState(company.payroll_portal_name ?? '');
   const [portalUrl, setPortalUrl] = useState(company.payroll_portal_url ?? '');
@@ -42,7 +42,6 @@ export function SettingsForm({ company }: { company: Editable }) {
     const { error: updateError } = await createClient()
       .from('companies')
       .update({
-        name: name.trim(),
         city: city.trim(),
         payroll_portal_name: portalName.trim() || null,
         payroll_portal_url: portalUrl.trim() || null,
@@ -62,7 +61,8 @@ export function SettingsForm({ company }: { company: Editable }) {
       <div className="fields">
         <div className="field">
           <label htmlFor="s-name">Company name</label>
-          <input id="s-name" required maxLength={120} autoComplete="organization" value={name} onChange={(e) => setName(e.target.value)} />
+          <input id="s-name" readOnly aria-describedby="s-name-hint" value={name} />
+          <span className="hint" id="s-name-hint">Contact LiftCrew to change your company name. We re-verify it so movers can trust who's booking them.</span>
         </div>
         <div className="field">
           <label htmlFor="s-city">City</label>

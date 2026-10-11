@@ -38,23 +38,26 @@ LiftCrew lets **moving companies** book **movers** for jobs. Two apps share one 
 ## Security model
 
 All of it lives in `supabase/migrations/20261011000000_core.sql` and is tested by
-`supabase/tests/run_local.sh` (73 checks).
+`supabase/tests/run_local.sh` (96 checks, including a regression test for every finding of the independent security review).
 
 - Clients get **SELECT only** on tables, plus UPDATE on a few profile columns:
-  - `companies`: `name, city, payroll_portal_name, payroll_portal_url`
+  - `companies`: `city, payroll_portal_name, payroll_portal_url` (name, permit and insurance changes go through LiftCrew staff, who re-verify)
   - `movers`: `full_name, city, roles, license, years_experience, asking_rate, bio, available_days`
   - `mover_private`: `phone`
 - **Every other write is a database function** called with `supabase.rpc(name, args)`. Each checks the
   caller and raises a plain-English error message (show `error.message` to the user via `friendlyError()`).
 - Row visibility:
   - `movers`: the mover themself, and verified companies.
-  - `mover_private` (phone): the mover, and companies with a pending/confirmed booking (or completed in the last 14 days).
+  - `mover_private` (phone): the mover, and companies with a **confirmed** booking (or completed in the last 14 days). A pending invitation does not unlock it. Phones are normalized to `(707) 555-0101`; anything that isn't a 10-digit US number is refused.
   - `jobs`: the owning company; movers see open jobs dated today or later, plus any job they requested,
     were booked on, or were offered standby on.
   - `bookings`, `standby`, `job_requests`: the mover involved and the job's company.
   - `hires`: that company and that mover.
   - `reviews`, `review_responses`, `review_disputes`: verified companies, and the reviewed mover.
-  - `companies`: any signed-in user sees verified companies (name/city show on jobs).
+  - `companies`: any signed-in user can read only `id, name, city, verified, job_prefix, payroll_portal_name, payroll_portal_url, created_at` of verified companies. The owner reads the full record (permit, insurance) with `rpc('my_company')`.
+  - Reviews whose dispute LiftCrew staff marked `removed` disappear for everyone and stop counting in `mover_stats`.
+  - Nothing about a booking can be withdrawn or canceled once the job's start time has passed; the company completes the job instead (0 hours for anyone who didn't work).
+  - Only the functions listed below are executable by signed-in users; internal helpers are not.
 - Use only the **anon/publishable key** in the apps. Never ship the service-role key.
 
 ## Tables (columns the apps use)
@@ -87,6 +90,7 @@ Arguments are in `RpcArgs` in `packages/shared/src/types.ts`. Each returns the c
 
 Company (caller must own a verified company):
 - `create_company(p_name, p_city, p_permit_number, p_insurance_expires, p_job_prefix)` — onboarding; works before verification
+- `my_company()` — the caller's full company row (use `.maybeSingle()`)
 - `post_job(p_work_date, p_start_time, p_est_hours, p_route, p_description, p_crew_size, p_role, p_hourly_rate, p_truck)`
 - `invite_mover(p_job, p_mover)` → pending booking the mover must accept
 - `book_requester(p_job, p_mover)` → confirmed booking for a mover who requested the job

@@ -16,7 +16,7 @@ export default function ForgotPassword() {
     if (!EMAIL_RE.test(e)) return setError('Enter a valid email address.');
     setError(null);
     setBusy(true);
-    const { error: err } = await supabase.auth.resetPasswordForEmail(e, { redirectTo: authCallbackUrl() });
+    const { error: err } = await supabase.auth.resetPasswordForEmail(e, { redirectTo: authCallbackUrl('recovery') });
     setBusy(false);
     if (err) return setError(friendlyError(err));
     setSent(true);
