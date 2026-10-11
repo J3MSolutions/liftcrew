@@ -1,6 +1,11 @@
 import { TIMEZONE, WEEKDAYS } from './constants';
 import type { Num, Weekday } from './types';
 
+function ymd(isoDate: string): [number, number, number] {
+  const [y = 1970, m = 1, d = 1] = isoDate.slice(0, 10).split('-').map(Number);
+  return [y, m, d];
+}
+
 export const toNum = (v: Num | null | undefined): number => (v == null || v === '' ? 0 : Number(v));
 
 export const money = (v: Num | null | undefined): string =>
@@ -8,7 +13,7 @@ export const money = (v: Num | null | undefined): string =>
 
 /** "2026-10-17" -> "Sat, Oct 17" (date-only values are calendar dates, not instants). */
 export function fmtDate(isoDate: string): string {
-  const [y, m, d] = isoDate.slice(0, 10).split('-').map(Number);
+  const [y, m, d] = ymd(isoDate);
   return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
     weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
   });
@@ -16,15 +21,15 @@ export function fmtDate(isoDate: string): string {
 
 /** "08:00:00" -> "8:00 AM" */
 export function fmtTime(t: string): string {
-  const [hh, mm] = t.split(':').map(Number);
+  const [hh = 0, mm = 0] = t.split(':').map(Number);
   const ap = hh >= 12 ? 'PM' : 'AM';
   return `${hh % 12 || 12}:${String(mm).padStart(2, '0')} ${ap}`;
 }
 
 export function weekdayOf(isoDate: string): Weekday {
-  const [y, m, d] = isoDate.slice(0, 10).split('-').map(Number);
+  const [y, m, d] = ymd(isoDate);
   const js = new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay(); // 0 = Sun
-  return WEEKDAYS[(js + 6) % 7];
+  return WEEKDAYS[(js + 6) % 7] ?? 'Mon';
 }
 
 /** Today's date in LiftCrew's timezone, as YYYY-MM-DD. */

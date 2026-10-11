@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "LiftCrew",
+    "slug": "liftcrew",
+    "scheme": "liftcrew",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "platforms": ["ios", "android"],
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.liftcrew.mover"
+    },
+    "android": {
+      "package": "com.liftcrew.mover",
+      "edgeToEdgeEnabled": true
+    },
+    "plugins": ["expo-router"]
+  }
+}

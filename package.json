@@ -1,0 +1,11 @@
+{
+  "name": "liftcrew",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "web": "npm run dev -w @liftcrew/web",
+    "mobile": "npm run start -w @liftcrew/mobile",
+    "test": "npm test -w @liftcrew/shared",
+    "test:db": "bash supabase/tests/run_local.sh"
+  }
+}
