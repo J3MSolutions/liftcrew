@@ -199,6 +199,20 @@ pre.preview { margin: 6px 0 0; font-size: .74rem; background: var(--sunk); borde
 .auth-card form { display: grid; gap: 14px; }
 .auth-foot { font-size: .88rem; color: var(--muted); display: grid; gap: 4px; }
 
+/* ---------- Additions for semantic markup ---------- */
+dl.facts { margin: 0; }
+.fact dt, .fact dd { margin: 0; }
+h2.section-label { font-family: var(--body); line-height: 1.5; }
+.plain-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.format-option { border: 1px solid transparent; }
+.format-option:has(input:checked) { border-color: var(--blanket); }
+.format-option:has(input:focus-visible) { outline: 2px solid var(--blanket); outline-offset: 2px; }
+.format-option input[type="radio"] { flex: none; accent-color: var(--blanket); width: 16px; height: 16px; margin: 0; }
+.readonly-box .line { flex-wrap: wrap; }
+.table-wrap:focus-visible { outline: 2px solid var(--blanket); outline-offset: 2px; }
+pre.preview:focus-visible { outline: 2px solid var(--blanket); }
+.crew-row .phone { margin-top: 2px; }
+
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; min-height: 0; }
   .nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; }
