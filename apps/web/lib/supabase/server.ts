@@ -2,6 +2,10 @@ import { createServerClient } from '@supabase/ssr';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { SUPABASE_ANON_KEY, SUPABASE_URL, assertEnv } from '../env';
+import type { CookieOptions } from '@supabase/ssr';
+
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
+
 
 /** Supabase client for Server Components, Route Handlers and Server Actions. */
 export async function createClient(): Promise<SupabaseClient> {
@@ -12,7 +16,7 @@ export async function createClient(): Promise<SupabaseClient> {
       getAll() {
         return cookieStore.getAll();
       },
-      setAll(cookiesToSet) {
+      setAll(cookiesToSet: CookieToSet[]) {
         try {
           cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options));
         } catch {
